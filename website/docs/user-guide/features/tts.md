@@ -10,7 +10,7 @@ Hermes Agent supports both text-to-speech output and voice message transcription
 
 ## Text-to-Speech
 
-Convert text to speech with five providers:
+Convert text to speech with six providers:
 
 | Provider | Quality | Cost | API Key |
 |----------|---------|------|---------|
@@ -19,6 +19,7 @@ Convert text to speech with five providers:
 | **OpenAI TTS** | Good | Paid | `VOICE_TOOLS_OPENAI_KEY` |
 | **MiniMax TTS** | Excellent | Paid | `MINIMAX_API_KEY` |
 | **NeuTTS** | Good | Free | None needed |
+| **Piper** | Good | Free | None needed |
 
 ### Platform Delivery
 
@@ -34,7 +35,7 @@ Convert text to speech with five providers:
 ```yaml
 # In ~/.hermes/config.yaml
 tts:
-  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "neutts"
+  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "neutts" | "piper"
   edge:
     voice: "en-US-AriaNeural"   # 322 voices, 74 languages
   elevenlabs:
@@ -55,6 +56,14 @@ tts:
     ref_text: ''
     model: neuphonic/neutts-air-q4-gguf
     device: cpu
+  piper:
+    binary_path: "piper"        # local/offline Piper CLI
+    model: "pl_PL-gosia-medium" # model id; downloads on first use
+    model_path: ""              # optional local .onnx override
+    config_path: ""             # optional local .onnx.json override
+    models_dir: ""              # optional cache dir; default: ~/.hermes/tts/piper
+    speaker: ""                 # optional speaker id/name
+    sample_rate: 0              # optional output sample rate override
 ```
 
 ### Telegram Voice Bubbles & ffmpeg
@@ -65,6 +74,7 @@ Telegram voice bubbles require Opus/OGG audio format:
 - **Edge TTS** (default) outputs MP3 and needs **ffmpeg** to convert:
 - **MiniMax TTS** outputs MP3 and needs **ffmpeg** to convert for Telegram voice bubbles
 - **NeuTTS** outputs WAV and also needs **ffmpeg** to convert for Telegram voice bubbles
+- **Piper** outputs WAV and also needs **ffmpeg** to convert for Telegram voice bubbles
 
 ```bash
 # Ubuntu/Debian
@@ -77,7 +87,16 @@ brew install ffmpeg
 sudo dnf install ffmpeg
 ```
 
-Without ffmpeg, Edge TTS, MiniMax TTS, and NeuTTS audio are sent as regular audio files (playable, but shown as a rectangular player instead of a voice bubble).
+Without ffmpeg, Edge TTS, MiniMax TTS, NeuTTS, and Piper audio are sent as regular audio files (playable, but shown as a rectangular player instead of a voice bubble).
+
+### Piper
+
+`piper` is a local/offline provider that uses local voice models and no API key.
+
+- `tts.piper.model` is the easiest path: Hermes downloads the selected model into `~/.hermes/tts/piper/` on first use.
+- `tts.piper.model_path` is the manual/custom path when you already manage `.onnx` files yourself.
+- Language selection happens through the model name itself, not a separate `language` field.
+- Voice models are local assets and usually take tens to hundreds of MB each, depending on the voice.
 
 :::tip
 If you want voice bubbles without installing ffmpeg, switch to the OpenAI or ElevenLabs provider.

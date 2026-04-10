@@ -143,6 +143,7 @@ ELEVENLABS_API_KEY=***
 
 - `edge` → free and good enough for most users
 - `neutts` → free local/on-device TTS
+- `piper` → local/offline TTS with local voice models
 - `elevenlabs` → best quality
 - `openai` → good middle ground
 
@@ -190,6 +191,23 @@ tts:
     model: neuphonic/neutts-air-q4-gguf
     device: cpu
 ```
+
+If you want local/offline Piper instead, use:
+
+```yaml
+tts:
+  provider: "piper"
+  piper:
+    binary_path: "piper"
+    model: "pl_PL-gosia-medium"
+    model_path: ""
+    config_path: ""
+    models_dir: ""
+    speaker: ""
+    sample_rate: 0
+```
+
+Hermes stores Piper models under `~/.hermes/tts/piper/` by default. Models are local assets and typically use tens to hundreds of MB each. For Telegram voice bubbles, install `ffmpeg` so Hermes can convert Piper's WAV output to OGG/Opus.
 
 ## Use case 1: CLI voice mode
 

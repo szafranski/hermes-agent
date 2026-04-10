@@ -567,6 +567,12 @@ def _print_setup_summary(config: dict, hermes_home):
             tool_status.append(("Text-to-Speech (NeuTTS local)", True, None))
         else:
             tool_status.append(("Text-to-Speech (NeuTTS — not installed)", False, "run 'hermes setup tts'"))
+    elif tts_provider == "piper":
+        piper_ok, reason = _check_piper_status(config)
+        if piper_ok:
+            tool_status.append(("Text-to-Speech (Piper local/offline)", True, None))
+        else:
+            tool_status.append(("Text-to-Speech (Piper local/offline)", False, reason or "run 'hermes setup tts'"))
     else:
         tool_status.append(("Text-to-Speech (Edge TTS)", True, None))
 
@@ -1033,8 +1039,77 @@ def _install_neutts_deps() -> bool:
         return False
 
 
+def _default_piper_models_dir_display() -> str:
+    from hermes_constants import display_hermes_home
+
+    return f"{display_hermes_home()}/tts/piper"
+
+
+def _check_piper_status(config: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """Return whether Piper is configured well enough to run."""
+    try:
+        from tools.tts_tool import _get_piper_config, _resolve_piper_binary, _resolve_piper_model_paths
+
+        piper_config = _get_piper_config(config.get("tts", {}))
+        _resolve_piper_binary(piper_config)
+        model_path_raw = str(piper_config.get("model_path") or "").strip()
+        if model_path_raw:
+            _resolve_piper_model_paths(piper_config, allow_download=False)
+        elif not str(piper_config.get("model") or "").strip():
+            return False, "set a Piper model or model_path"
+        return True, None
+    except FileNotFoundError:
+        return False, "Piper binary not found"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _configure_piper_settings(config: dict) -> None:
+    """Interactive Piper configuration flow."""
+    tts_cfg = config.setdefault("tts", {})
+    piper_cfg = dict(tts_cfg.get("piper") or {})
+
+    print()
+    print_info("Piper is a local/offline TTS provider with local voice models.")
+    print_info("Model size depends on the voice you choose, typically tens to hundreds of MB.")
+    print_info("Default models directory: " + _default_piper_models_dir_display())
+    print()
+
+    mode_choices = [
+        "Model name (auto-download on first use)",
+        "Local model path (manual/custom)",
+        "Keep current Piper model settings",
+    ]
+    default_mode = 1 if str(piper_cfg.get("model_path") or "").strip() else 0
+    mode_idx = prompt_choice("How should Hermes use Piper models?", mode_choices, default_mode)
+
+    piper_cfg["binary_path"] = prompt("Piper binary path", str(piper_cfg.get("binary_path") or "piper"))
+    models_dir_default = str(piper_cfg.get("models_dir") or _default_piper_models_dir_display())
+    piper_cfg["models_dir"] = prompt("Piper models directory", models_dir_default)
+
+    if mode_idx == 0:
+        current_model = str(piper_cfg.get("model") or "pl_PL-gosia-medium")
+        piper_cfg["model"] = prompt("Piper model name", current_model)
+        piper_cfg["model_path"] = ""
+    elif mode_idx == 1:
+        current_model_path = str(piper_cfg.get("model_path") or "")
+        piper_cfg["model_path"] = prompt("Piper model path", current_model_path)
+
+    piper_cfg["config_path"] = prompt("Piper config path (optional)", str(piper_cfg.get("config_path") or ""))
+    piper_cfg["speaker"] = prompt("Piper speaker (optional)", str(piper_cfg.get("speaker") or ""))
+    piper_cfg["sample_rate"] = prompt("Preferred sample rate (optional)", str(piper_cfg.get("sample_rate") or ""))
+
+    tts_cfg["piper"] = piper_cfg
+
+    ready, reason = _check_piper_status(config)
+    if ready:
+        print_success("Piper configuration looks ready")
+    else:
+        print_warning(f"Piper saved, but needs attention: {reason}")
+
+
 def _setup_tts_provider(config: dict):
-    """Interactive TTS provider selection with install flow for NeuTTS."""
+    """Interactive TTS provider selection with local/cloud provider flows."""
     tts_config = config.get("tts", {})
     current_provider = tts_config.get("provider", "edge")
     subscription_features = get_nous_subscription_features(config)
@@ -1045,6 +1120,7 @@ def _setup_tts_provider(config: dict):
         "openai": "OpenAI TTS",
         "minimax": "MiniMax TTS",
         "neutts": "NeuTTS",
+        "piper": "Piper",
     }
     current_label = provider_labels.get(current_provider, current_provider)
 
@@ -1065,9 +1141,10 @@ def _setup_tts_provider(config: dict):
             "OpenAI TTS (good quality, needs API key)",
             "MiniMax TTS (high quality with voice cloning, needs API key)",
             "NeuTTS (local on-device, free, ~300MB model download)",
+            "Piper (local/offline, local models, no API key)",
         ]
     )
-    providers.extend(["edge", "elevenlabs", "openai", "minimax", "neutts"])
+    providers.extend(["edge", "elevenlabs", "openai", "minimax", "neutts", "piper"])
     choices.append(f"Keep current ({current_label})")
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
@@ -1144,6 +1221,8 @@ def _setup_tts_provider(config: dict):
             else:
                 print_warning("No API key provided. Falling back to Edge TTS.")
                 selected = "edge"
+    elif selected == "piper":
+        _configure_piper_settings(config)
 
     # Save the selection
     if "tts" not in config:

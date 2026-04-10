@@ -115,6 +115,12 @@ def check_packages():
     except ImportError:
         warn("elevenlabs SDK", "not installed — premium TTS unavailable")
 
+    piper_path = shutil.which("piper")
+    if piper_path:
+        check("piper CLI", True, piper_path)
+    else:
+        warn("piper CLI", "not installed — Piper local/offline TTS unavailable")
+
     return ok
 
 
@@ -251,6 +257,17 @@ def check_config(groq_key, eleven_key):
                 warn("STT config says groq but GROQ_API_KEY is missing")
             if tts_provider == "elevenlabs" and not eleven_key:
                 warn("TTS config says elevenlabs but ELEVENLABS_API_KEY is missing")
+            if tts_provider == "piper":
+                piper_cfg = cfg.get("tts", {}).get("piper", {}) or {}
+                binary_path = str(piper_cfg.get("binary_path") or "piper").strip()
+                if not shutil.which(binary_path) and not Path(binary_path).expanduser().exists():
+                    warn("TTS config says piper but Piper binary is missing", binary_path)
+                model = str(piper_cfg.get("model") or "").strip()
+                model_path = str(piper_cfg.get("model_path") or "").strip()
+                if not model and not model_path:
+                    warn("TTS config says piper but no model/model_path is configured")
+                if model_path and not Path(model_path).expanduser().exists():
+                    warn("TTS Piper model_path missing", model_path)
         except Exception as e:
             warn("config.yaml", f"parse error: {e}")
     else:
