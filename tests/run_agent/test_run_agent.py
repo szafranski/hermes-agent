@@ -2473,6 +2473,36 @@ class TestCredentialPoolRecovery:
         assert retry_same is False
         agent._swap_credential.assert_called_once_with(next_entry)
 
+    def test_recover_with_pool_rotates_on_403(self, agent):
+        next_entry = SimpleNamespace(label="secondary", id="cred-2")
+
+        class _Pool:
+            def current(self):
+                return SimpleNamespace(label="primary", id="cred-1")
+
+            def try_refresh_current(self):
+                return None
+
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None, exclude_ids=None):
+                assert status_code == 403
+                assert exclude_ids == {"cred-1"}
+                return next_entry
+
+        attempted_ids = set()
+        agent._credential_pool = _Pool()
+        agent._swap_credential = MagicMock()
+
+        recovered, retry_same = agent._recover_with_credential_pool(
+            status_code=403,
+            has_retried_429=False,
+            attempted_credential_ids=attempted_ids,
+        )
+
+        assert recovered is True
+        assert retry_same is False
+        assert attempted_ids == {"cred-1", "cred-2"}
+        agent._swap_credential.assert_called_once_with(next_entry)
+
     def test_recover_with_pool_retries_first_429_then_rotates(self, agent):
         next_entry = SimpleNamespace(label="secondary")
 
@@ -2616,6 +2646,37 @@ class TestCredentialPoolRecovery:
         assert retry_same is False
         assert captured["status_code"] == 429
         assert captured["error_context"]["reason"] == "device_code_exhausted"
+
+    def test_recover_with_pool_rotates_codex_on_temporary_upstream_error(self, agent):
+        next_entry = SimpleNamespace(label="secondary", id="cred-2")
+
+        class _Pool:
+            def current(self):
+                return SimpleNamespace(label="primary", id="cred-1")
+
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None, exclude_ids=None):
+                assert status_code == 503
+                assert exclude_ids == {"cred-1"}
+                assert error_context == {"reason": "overloaded"}
+                return next_entry
+
+        attempted_ids = set()
+        agent.provider = "openai-codex"
+        agent._credential_pool = _Pool()
+        agent._swap_credential = MagicMock()
+
+        recovered, retry_same = agent._recover_with_credential_pool(
+            status_code=503,
+            has_retried_429=False,
+            attempted_credential_ids=attempted_ids,
+            classified_reason=FailoverReason.overloaded,
+            error_context={"reason": "overloaded"},
+        )
+
+        assert recovered is True
+        assert retry_same is False
+        assert attempted_ids == {"cred-1", "cred-2"}
+        agent._swap_credential.assert_called_once_with(next_entry)
 
 
 class TestMaxTokensParam:

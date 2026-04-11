@@ -681,6 +681,15 @@ def resolve_runtime_provider(
                 model_cfg=model_cfg,
                 pool=pool,
             )
+        if provider == "openai-codex":
+            if requested_provider != "auto":
+                raise AuthError(
+                    "All pooled Codex OAuth sessions are currently cooling down or unavailable.",
+                    provider="openai-codex",
+                    code="codex_pool_unavailable",
+                )
+            logger.info("Auto-detected Codex provider but pooled sessions are unavailable; "
+                        "falling through to next provider.")
 
     if provider == "nous":
         try:

@@ -1468,7 +1468,49 @@ def resolve_codex_runtime_credentials(
     refresh_if_expiring: bool = True,
     refresh_skew_seconds: int = CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 ) -> Dict[str, Any]:
-    """Resolve runtime credentials from Hermes's own Codex token store."""
+    """Resolve runtime credentials from the Codex credential pool when present."""
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool("openai-codex")
+    except Exception:
+        pool = None
+
+    if pool and pool.has_credentials():
+        entry = pool.select()
+        if entry is None:
+            raise AuthError(
+                "All pooled Codex OAuth sessions are currently cooling down or unavailable.",
+                provider="openai-codex",
+                code="codex_pool_unavailable",
+            )
+        if force_refresh:
+            refreshed = pool.try_refresh_current()
+            if refreshed is None:
+                raise AuthError(
+                    "Codex OAuth session refresh failed for the current pooled credential.",
+                    provider="openai-codex",
+                    code="codex_pool_refresh_failed",
+                    relogin_required=True,
+                )
+            entry = refreshed
+
+        api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+        base_url = (
+            getattr(entry, "runtime_base_url", None)
+            or getattr(entry, "base_url", None)
+            or os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
+            or DEFAULT_CODEX_BASE_URL
+        )
+        return {
+            "provider": "openai-codex",
+            "base_url": base_url,
+            "api_key": api_key,
+            "source": getattr(entry, "source", "pool"),
+            "last_refresh": getattr(entry, "last_refresh", None),
+            "auth_mode": "chatgpt",
+        }
+
     try:
         data = _read_codex_tokens()
     except AuthError as orig_err:
@@ -1523,6 +1565,38 @@ def resolve_codex_runtime_credentials(
         "last_refresh": data.get("last_refresh"),
         "auth_mode": "chatgpt",
     }
+
+
+def _save_codex_tokens_to_pool(tokens: Dict[str, Any], *, base_url: Optional[str] = None, last_refresh: Optional[str] = None) -> None:
+    """Persist a Hermes-managed Codex OAuth session into the credential pool."""
+    access_token = str(tokens.get("access_token", "") or "").strip()
+    refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+    if not access_token:
+        return
+
+    from agent.credential_pool import (
+        AUTH_TYPE_OAUTH,
+        SOURCE_MANUAL,
+        PooledCredential,
+        label_from_token,
+        load_pool,
+    )
+
+    pool = load_pool("openai-codex")
+    label = label_from_token(access_token, f"openai-codex-{len(pool.entries()) + 1}")
+    entry = PooledCredential(
+        provider="openai-codex",
+        id=uuid.uuid4().hex[:6],
+        label=label,
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source=f"{SOURCE_MANUAL}:device_code",
+        access_token=access_token,
+        refresh_token=refresh_token or None,
+        base_url=(base_url or DEFAULT_CODEX_BASE_URL).rstrip("/"),
+        last_refresh=last_refresh,
+    )
+    pool.add_entry(entry)
 
 
 # =============================================================================
@@ -2778,6 +2852,11 @@ def _login_openai_codex(args, pconfig: ProviderConfig) -> None:
             do_import = "n"
         if do_import in ("y", "yes"):
             _save_codex_tokens(cli_tokens)
+            _save_codex_tokens_to_pool(
+                cli_tokens,
+                base_url=os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/") or DEFAULT_CODEX_BASE_URL,
+                last_refresh=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
             base_url = os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/") or DEFAULT_CODEX_BASE_URL
             config_path = _update_config_for_provider("openai-codex", base_url)
             print()
@@ -2796,6 +2875,11 @@ def _login_openai_codex(args, pconfig: ProviderConfig) -> None:
 
     # Save tokens to Hermes auth store
     _save_codex_tokens(creds["tokens"], creds.get("last_refresh"))
+    _save_codex_tokens_to_pool(
+        creds["tokens"],
+        base_url=creds.get("base_url", DEFAULT_CODEX_BASE_URL),
+        last_refresh=creds.get("last_refresh"),
+    )
     config_path = _update_config_for_provider("openai-codex", creds.get("base_url", DEFAULT_CODEX_BASE_URL))
     print()
     print("Login successful!")

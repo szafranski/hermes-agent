@@ -494,7 +494,10 @@ class CredentialPool:
         Applies to any OAuth provider whose singleton lives in auth.json
         (currently Nous and OpenAI Codex).
         """
-        if entry.source != "device_code":
+        if not (
+            entry.source == "device_code"
+            or entry.source.endswith(":device_code")
+        ):
             return
         try:
             with _auth_store_lock():
@@ -739,9 +742,9 @@ class CredentialPool:
             return False
         return False
 
-    def select(self) -> Optional[PooledCredential]:
+    def select(self, *, exclude_ids: Optional[Set[str]] = None) -> Optional[PooledCredential]:
         with self._lock:
-            return self._select_unlocked()
+            return self._select_unlocked(exclude_ids=exclude_ids)
 
     def _available_entries(self, *, clear_expired: bool = False, refresh: bool = False) -> List[PooledCredential]:
         """Return entries not currently in exhaustion cooldown.
@@ -800,8 +803,11 @@ class CredentialPool:
             self._persist()
         return available
 
-    def _select_unlocked(self) -> Optional[PooledCredential]:
+    def _select_unlocked(self, *, exclude_ids: Optional[Set[str]] = None) -> Optional[PooledCredential]:
+        excluded = set(exclude_ids or ())
         available = self._available_entries(clear_expired=True, refresh=True)
+        if excluded:
+            available = [entry for entry in available if entry.id not in excluded]
         if not available:
             self._current_id = None
             logger.info("credential pool: no available entries (all exhausted or empty)")
@@ -842,6 +848,7 @@ class CredentialPool:
         *,
         status_code: Optional[int],
         error_context: Optional[Dict[str, Any]] = None,
+        exclude_ids: Optional[Set[str]] = None,
     ) -> Optional[PooledCredential]:
         with self._lock:
             entry = self.current() or self._select_unlocked()
@@ -854,7 +861,9 @@ class CredentialPool:
             )
             self._mark_exhausted(entry, status_code, error_context)
             self._current_id = None
-            next_entry = self._select_unlocked()
+            excluded = set(exclude_ids or ())
+            excluded.add(entry.id)
+            next_entry = self._select_unlocked(exclude_ids=excluded)
             if next_entry:
                 _next_label = next_entry.label or next_entry.id[:8]
                 logger.info("credential pool: rotated to %s", _next_label)

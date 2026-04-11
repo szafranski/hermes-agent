@@ -1,4 +1,5 @@
 from hermes_cli import runtime_provider as rp
+import pytest
 
 
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
@@ -116,6 +117,33 @@ def test_resolve_runtime_provider_falls_back_when_pool_empty(monkeypatch):
 
     assert resolved["api_key"] == "codex-token"
     assert resolved.get("credential_pool") is None
+
+
+def test_resolve_runtime_provider_codex_pool_unavailable_does_not_fallback(monkeypatch):
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return None
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "legacy-token",
+            "source": "hermes-auth-store",
+        },
+    )
+
+    with pytest.raises(rp.AuthError) as exc:
+        rp.resolve_runtime_provider(requested="openai-codex")
+
+    assert exc.value.code == "codex_pool_unavailable"
 
 
 def test_resolve_runtime_provider_codex(monkeypatch):

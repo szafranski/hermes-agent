@@ -91,11 +91,11 @@ def test_resolve_codex_runtime_credentials_refreshes_expiring_token(tmp_path, mo
 
     called = {"count": 0}
 
-    def _fake_refresh(tokens, timeout_seconds):
+    def _fake_refresh(access_token, refresh_token, timeout_seconds=20.0):
         called["count"] += 1
         return {"access_token": "access-new", "refresh_token": "refresh-new"}
 
-    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", _fake_refresh)
 
     resolved = resolve_codex_runtime_credentials()
 
@@ -107,14 +107,15 @@ def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     _setup_hermes_auth(hermes_home, access_token="access-current", refresh_token="refresh-old")
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr("hermes_cli.auth._import_codex_cli_tokens", lambda: None)
 
     called = {"count": 0}
 
-    def _fake_refresh(tokens, timeout_seconds):
+    def _fake_refresh(access_token, refresh_token, timeout_seconds=20.0):
         called["count"] += 1
         return {"access_token": "access-forced", "refresh_token": "refresh-new"}
 
-    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", _fake_refresh)
 
     resolved = resolve_codex_runtime_credentials(force_refresh=True, refresh_if_expiring=False)
 
@@ -187,6 +188,59 @@ def test_resolve_returns_hermes_auth_store_source(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
     creds = resolve_codex_runtime_credentials()
-    assert creds["source"] == "hermes-auth-store"
+    assert creds["source"] == "device_code"
     assert creds["provider"] == "openai-codex"
     assert creds["base_url"] == DEFAULT_CODEX_BASE_URL
+
+
+def test_resolve_codex_runtime_credentials_prefers_pool_entry(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    auth_store = {
+        "version": 1,
+        "providers": {
+            "openai-codex": {
+                "tokens": {
+                    "access_token": "legacy-access",
+                    "refresh_token": "legacy-refresh",
+                }
+            }
+        },
+        "credential_pool": {
+            "openai-codex": [
+                {
+                    "id": "cred-1",
+                    "label": "pool-user",
+                    "auth_type": "oauth",
+                    "priority": 0,
+                    "source": "manual:device_code",
+                    "access_token": "pool-access",
+                    "refresh_token": "pool-refresh",
+                    "base_url": DEFAULT_CODEX_BASE_URL,
+                }
+            ]
+        },
+    }
+    (hermes_home / "auth.json").write_text(json.dumps(auth_store, indent=2))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    creds = resolve_codex_runtime_credentials()
+
+    assert creds["api_key"] == "pool-access"
+    assert creds["source"] == "manual:device_code"
+
+
+def test_resolve_codex_runtime_credentials_raises_when_pool_unavailable(tmp_path, monkeypatch):
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return None
+
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: _Pool())
+
+    with pytest.raises(AuthError) as exc:
+        resolve_codex_runtime_credentials()
+
+    assert exc.value.code == "codex_pool_unavailable"

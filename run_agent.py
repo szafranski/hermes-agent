@@ -25,6 +25,7 @@ import base64
 import concurrent.futures
 import copy
 import hashlib
+import inspect
 import json
 import logging
 logger = logging.getLogger(__name__)
@@ -4434,6 +4435,9 @@ class AIAgent:
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider != "openai-codex":
             return False
+        if self._credential_pool is not None:
+            # Pooled Codex sessions refresh through the credential pool path.
+            return False
 
         try:
             from hermes_cli.auth import resolve_codex_runtime_credentials
@@ -4583,6 +4587,7 @@ class AIAgent:
         *,
         status_code: Optional[int],
         has_retried_429: bool,
+        attempted_credential_ids: Optional[set[str]] = None,
         classified_reason: Optional[FailoverReason] = None,
         error_context: Optional[Dict[str, Any]] = None,
     ) -> tuple[bool, bool]:
@@ -4603,6 +4608,41 @@ class AIAgent:
         pool = self._credential_pool
         if pool is None:
             return False, has_retried_429
+        attempted_credential_ids = attempted_credential_ids if attempted_credential_ids is not None else set()
+        current_entry_fn = getattr(pool, "current", None)
+        current_entry = current_entry_fn() if callable(current_entry_fn) else None
+        current_entry_id = getattr(current_entry, "id", None)
+        if isinstance(current_entry_id, str) and current_entry_id:
+            attempted_credential_ids.add(current_entry_id)
+
+        def _rotate(*, rotate_status: int) -> Optional[Any]:
+            rotate_fn = getattr(pool, "mark_exhausted_and_rotate", None)
+            if not callable(rotate_fn):
+                return None
+            signature_target = getattr(rotate_fn, "side_effect", None)
+            if not callable(signature_target):
+                signature_target = rotate_fn
+            try:
+                sig = inspect.signature(signature_target)
+                supports_exclude_ids = (
+                    "exclude_ids" in sig.parameters
+                    or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD
+                        for param in sig.parameters.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                supports_exclude_ids = True
+            if supports_exclude_ids:
+                return rotate_fn(
+                    status_code=rotate_status,
+                    error_context=error_context,
+                    exclude_ids=attempted_credential_ids,
+                )
+            return rotate_fn(
+                status_code=rotate_status,
+                error_context=error_context,
+            )
 
         effective_reason = classified_reason
         if effective_reason is None:
@@ -4610,18 +4650,19 @@ class AIAgent:
                 effective_reason = FailoverReason.billing
             elif status_code == 429:
                 effective_reason = FailoverReason.rate_limit
-            elif status_code == 401:
+            elif status_code in {401, 403}:
                 effective_reason = FailoverReason.auth
 
         if effective_reason == FailoverReason.billing:
             rotate_status = status_code if status_code is not None else 402
-            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            next_entry = _rotate(rotate_status=rotate_status)
             if next_entry is not None:
                 logger.info(
                     "Credential %s (billing) — rotated to pool entry %s",
                     rotate_status,
                     getattr(next_entry, "id", "?"),
                 )
+                attempted_credential_ids.add(getattr(next_entry, "id", ""))
                 self._swap_credential(next_entry)
                 return True, False
             return False, has_retried_429
@@ -4630,13 +4671,14 @@ class AIAgent:
             if not has_retried_429:
                 return False, True
             rotate_status = status_code if status_code is not None else 429
-            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            next_entry = _rotate(rotate_status=rotate_status)
             if next_entry is not None:
                 logger.info(
                     "Credential %s (rate limit) — rotated to pool entry %s",
                     rotate_status,
                     getattr(next_entry, "id", "?"),
                 )
+                attempted_credential_ids.add(getattr(next_entry, "id", ""))
                 self._swap_credential(next_entry)
                 return True, False
             return False, True
@@ -4645,18 +4687,38 @@ class AIAgent:
             refreshed = pool.try_refresh_current()
             if refreshed is not None:
                 logger.info(f"Credential auth failure — refreshed pool entry {getattr(refreshed, 'id', '?')}")
+                attempted_credential_ids.add(getattr(refreshed, "id", ""))
                 self._swap_credential(refreshed)
                 return True, has_retried_429
             # Refresh failed — rotate to next credential instead of giving up.
             # The failed entry is already marked exhausted by try_refresh_current().
             rotate_status = status_code if status_code is not None else 401
-            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            next_entry = _rotate(rotate_status=rotate_status)
             if next_entry is not None:
                 logger.info(
                     "Credential %s (auth refresh failed) — rotated to pool entry %s",
                     rotate_status,
                     getattr(next_entry, "id", "?"),
                 )
+                attempted_credential_ids.add(getattr(next_entry, "id", ""))
+                self._swap_credential(next_entry)
+                return True, False
+
+        if self.provider == "openai-codex" and effective_reason in {
+            FailoverReason.overloaded,
+            FailoverReason.server_error,
+            FailoverReason.timeout,
+        }:
+            rotate_status = status_code if status_code is not None else 503
+            next_entry = _rotate(rotate_status=rotate_status)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (%s) — rotated to pool entry %s",
+                    rotate_status,
+                    effective_reason.value,
+                    getattr(next_entry, "id", "?"),
+                )
+                attempted_credential_ids.add(getattr(next_entry, "id", ""))
                 self._swap_credential(next_entry)
                 return True, False
 
@@ -8018,6 +8080,7 @@ class AIAgent:
             nous_auth_retry_attempted=False
             thinking_sig_retry_attempted = False
             has_retried_429 = False
+            attempted_credential_ids: set[str] = set()
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
 
@@ -8560,6 +8623,7 @@ class AIAgent:
                                 self._vprint(f"{self.log_prefix}   💾 Cache: {cached:,}/{prompt:,} tokens ({hit_pct:.0f}% hit, {written:,} written)")
                     
                     has_retried_429 = False  # Reset on success
+                    attempted_credential_ids.clear()
                     self._touch_activity(f"API call #{api_call_count} completed")
                     break  # Success, exit retry loop
 
@@ -8644,6 +8708,7 @@ class AIAgent:
                     recovered_with_pool, has_retried_429 = self._recover_with_credential_pool(
                         status_code=status_code,
                         has_retried_429=has_retried_429,
+                        attempted_credential_ids=attempted_credential_ids,
                         classified_reason=classified.reason,
                         error_context=error_context,
                     )
