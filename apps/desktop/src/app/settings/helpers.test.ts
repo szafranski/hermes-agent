@@ -6,10 +6,13 @@ import { defineFieldCopy, fieldCopyForSchemaKey, schemaKeyToFieldCopyKey } from 
 import { enumOptionsFor, getNested, providerGroup, setNested, stripToolsetLabel, toolsetDisplayLabel } from './helpers'
 
 describe('settings helpers', () => {
-  it('lists Hindsight as a built-in desktop memory provider option', () => {
+  it('lists plugin memory providers without exposing the built-in alias as a plugin', () => {
     const options = enumOptionsFor('memory.provider', '', {})
 
+    expect(options).toContain('')
     expect(options).toContain('hindsight')
+    expect(options).not.toContain('builtin')
+    expect(enumOptionsFor('memory.provider', 'builtin', {})).not.toContain('builtin')
   })
 
   describe('defineFieldCopy', () => {
